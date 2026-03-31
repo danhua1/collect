@@ -1,0 +1,23 @@
+{
+  "name": "collect",
+  "version": "0.1.0",
+  "description": "Browser automation scripts for login and account switching.",
+  "main": "src/index.js",
+  "scripts": {
+    "login": "node src/cli.js login",
+    "switch-account": "node src/cli.js switch-account",
+    "favorite-item": "node src/cli.js favorite-item",
+    "start-api": "node src/server.js",
+    "list-accounts": "node src/cli.js list-accounts",
+    "validate-config": "node src/cli.js validate-config"
+  },
+  "keywords": [
+    "automation",
+    "playwright",
+    "login"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "playwright": "^1.53.0"
+  }
+}
