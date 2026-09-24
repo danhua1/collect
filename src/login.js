@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const { authDir, ensureAuthDir, loadConfig } = require("./config");
+const { launchChromium } = require("./browser");
 
 function assert(condition, message) {
   if (!condition) {
@@ -387,12 +388,7 @@ async function loginWithAccount(accountName, options = {}) {
   const siteConfig = loadConfig("site");
   const { name, account } = getAccount(accountName);
   const storageState = getStoragePath(siteConfig.siteName, name);
-  const { chromium } = require("playwright");
-
-  const browser = await chromium.launch({
-    headless: options.headless || siteConfig.browser?.headless || false,
-    slowMo: siteConfig.browser?.slowMo || 0
-  });
+  const browser = await launchChromium(siteConfig, options);
 
   try {
     const context = await browser.newContext({

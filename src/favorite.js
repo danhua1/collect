@@ -1,10 +1,8 @@
 const fs = require("fs");
 const path = require("path");
-const { chromium } = require("playwright");
 const { loadConfig, authDir } = require("./config");
+const { launchChromium, wait } = require("./browser");
 const { loginWithAccount } = require("./login");
-
-const EXECUTABLE_PATH = "/Users/dusiyuan/Library/Caches/ms-playwright/chromium-1208/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing";
 
 function getStoragePath(siteName, accountName) {
   return path.join(authDir, `${siteName || "site"}-${accountName}.json`);
@@ -15,6 +13,52 @@ function listConfiguredAccounts() {
   return Object.keys(accountsConfig.accounts || {});
 }
 
+function isRetryableFavoriteLoginError(error) {
+  return Boolean(
+    error &&
+    typeof error.message === "string" &&
+    (
+      error.message.includes("Frame was detached") ||
+      error.message.includes("Target page, context or browser has been closed")
+    )
+  );
+}
+
+async function ensureLoginWithRetry(accountName, options = {}) {
+  let lastError;
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await loginWithAccount(accountName, options);
+      return;
+    } catch (error) {
+      lastError = error;
+
+      if (!isRetryableFavoriteLoginError(error)) {
+        throw error;
+      }
+    }
+  }
+
+  throw lastError;
+}
+
+async function buildFavoriteDiagnostics(page) {
+  const bodyText = await page.locator("body").innerText().catch(() => "");
+  const normalizedText = bodyText.replace(/\s+/g, " ").trim();
+
+  return {
+    finalUrl: page.url(),
+    hasCollectedText: await page.locator("text=已收藏").count().catch(() => 0),
+    hasFavoriteText: await page.locator("text=收藏").count().catch(() => 0),
+    hasSuccessToast: await page.locator("text=收藏成功").count().catch(() => 0),
+    redirectedToLogin: page.url().includes("/show_login")
+      || await page.locator("text=第三方账号登录").count().catch(() => 0)
+      || await page.locator("text=网易邮箱账号登录").count().catch(() => 0),
+    bodySnippet: normalizedText.slice(0, 300)
+  };
+}
+
 async function favoriteItem(accountName, itemUrl, options = {}) {
   const siteConfig = loadConfig("site");
   const accountsConfig = loadConfig("accounts");
@@ -22,17 +66,21 @@ async function favoriteItem(accountName, itemUrl, options = {}) {
   const storageStatePath = getStoragePath(siteConfig.siteName, resolvedAccount);
 
   if (!fs.existsSync(storageStatePath)) {
-    await loginWithAccount(resolvedAccount, { headless: false });
+    await ensureLoginWithRetry(resolvedAccount, { headless: false });
   }
 
   if (!fs.existsSync(storageStatePath)) {
     throw new Error(`Missing saved session after login: ${storageStatePath}`);
   }
 
-  const browser = await chromium.launch({
-    executablePath: EXECUTABLE_PATH,
-    headless: options.headless || siteConfig.browser?.headless || false
-  });
+  return attemptFavoriteWithSession(resolvedAccount, itemUrl, options, 0);
+}
+
+async function attemptFavoriteWithSession(accountName, itemUrl, options = {}, retryCount = 0) {
+  const siteConfig = loadConfig("site");
+  const storageStatePath = getStoragePath(siteConfig.siteName, accountName);
+
+  const browser = await launchChromium(siteConfig, options);
 
   try {
     const context = await browser.newContext({
@@ -49,10 +97,10 @@ async function favoriteItem(accountName, itemUrl, options = {}) {
 
     if (await page.locator("text=已收藏").count()) {
       const result = {
-        accountName: resolvedAccount,
+        accountName,
         status: "already_favorited"
       };
-      console.log(`Account "${resolvedAccount}": item is already favorited.`);
+      console.log(`Account "${accountName}": item is already favorited.`);
       return result;
     }
 
@@ -60,18 +108,28 @@ async function favoriteItem(accountName, itemUrl, options = {}) {
     await favoriteButton.click({ force: true });
     await page.waitForTimeout(3000);
 
-    const hasCollectedText = await page.locator("text=已收藏").count();
-    const hasSuccessToast = await page.locator("text=收藏成功").count();
+    const diagnostics = await buildFavoriteDiagnostics(page);
+    const { hasCollectedText, hasSuccessToast, redirectedToLogin } = diagnostics;
+
+    if (redirectedToLogin && retryCount === 0) {
+      console.log(`Account "${accountName}": session expired for favorite action, refreshing login.`);
+      await browser.close();
+      await ensureLoginWithRetry(accountName, {
+        headless: false,
+        fresh: true
+      });
+      return attemptFavoriteWithSession(accountName, itemUrl, options, retryCount + 1);
+    }
 
     if (!hasCollectedText && !hasSuccessToast) {
-      throw new Error("Favorite action may not have completed.");
+      throw new Error(`Favorite action may not have completed. ${JSON.stringify(diagnostics)}`);
     }
 
     const result = {
-      accountName: resolvedAccount,
+      accountName,
       status: "favorited"
     };
-    console.log(`Account "${resolvedAccount}": favorite action completed.`);
+    console.log(`Account "${accountName}": favorite action completed.`);
     return result;
   } finally {
     await browser.close();
@@ -95,6 +153,8 @@ async function favoriteItemForAccounts(itemUrl, accountNames, options = {}) {
         error: error.message
       });
     }
+
+    await wait(options.accountIntervalMs || 1200);
   }
 
   return results;
